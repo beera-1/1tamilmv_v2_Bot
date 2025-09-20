@@ -12,4 +12,4 @@ pybase64
 regex
 lxml
 bs4
-# ======== SudoR2spr ========🎉 v2.0 ==
+# ======== SudoR2spr ========🎉 v2.0 ========
