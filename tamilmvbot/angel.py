@@ -1,6 +1,6 @@
 import os
 import time
-import threading  # for background auto-update thread
+import threading
 from dotenv import load_dotenv
 import telebot
 from telebot import types
@@ -8,6 +8,7 @@ import requests
 from bs4 import BeautifulSoup
 from flask import Flask, request
 import logging
+import json
 
 # Configure logging
 logging.basicConfig(
@@ -22,7 +23,7 @@ TOKEN = os.getenv('TOKEN')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 TAMILMV_URL = os.getenv('TAMILMV_URL', 'https://www.1tamilmv.com')
 PORT = int(os.getenv('PORT', 8080))
-CHANNEL_ID = '-1002585409711'  # your Telegram channel ID or username
+CHANNEL_ID = '-1002585409711'  # replace with your channel id or username
 
 # Initialize bot
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
@@ -30,10 +31,19 @@ bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 # Flask app
 app = Flask(__name__)
 
-# Global variables
-movie_list = []
-real_dict = {}
-posted_movies = set()  # to keep track of already posted movies
+# --- Load posted movies from file (for persistence) ---
+POSTED_FILE = 'posted_movies.json'
+
+try:
+    with open(POSTED_FILE, 'r') as f:
+        posted_movies = set(json.load(f))
+except:
+    posted_movies = set()
+
+# --- Save posted movies to file ---
+def save_posted_movies():
+    with open(POSTED_FILE, 'w') as f:
+        json.dump(list(posted_movies), f)
 
 # --- START command ---
 @bot.message_handler(commands=['start'])
@@ -71,25 +81,35 @@ def start(message):
     global movie_list, real_dict
     movie_list, real_dict = tamilmv()
 
-    # Load previous movies
     previous_movies = getattr(start, 'previous_movies', [])
-
-    # Detect new movies
     new_movies = [m for m in movie_list if m not in previous_movies]
 
-    # Send magnet links of new movies
-    if new_movies:
-        for new_movie in new_movies:
-            details_list = real_dict.get(new_movie, [])
-            for detail in details_list:
-                magnet_link = extract_magnet_link(detail)
-                if magnet_link:
-                    bot.send_message(
-                        CHANNEL_ID,
-                        f"🎬 <b>New Movie Added:</b> {new_movie}\n\n🧲 <b>Magnet Link:</b>\n<pre>{magnet_link}</pre>",
-                        parse_mode='HTML',
-                        disable_web_page_preview=True
-                    )
+    # Send magnet links of new movies with rate limit handling
+    for new_movie in new_movies:
+        details_list = real_dict.get(new_movie, [])
+        for detail in details_list:
+            magnet_link = extract_magnet_link(detail)
+            if magnet_link:
+                # Handle rate limit
+                success = False
+                while not success:
+                    try:
+                        bot.send_message(
+                            CHANNEL_ID,
+                            f"🎬 <b>New Movie Added:</b> {new_movie}\n\n🧲 <b>Magnet Link:</b>\n<pre>{magnet_link}</pre>",
+                            parse_mode='HTML',
+                            disable_web_page_preview=True
+                        )
+                        success = True
+                        time.sleep(0.5)
+                    except telebot.apihelper.ApiException as e:
+                        if '429' in str(e):
+                            retry_after = int(str(e).split('retry after')[1].split()[0])
+                            print(f"Rate limited. Retry after {retry_after} seconds.")
+                            time.sleep(retry_after + 1)
+                        else:
+                            print(f"Error sending message: {e}")
+                            success = True
     # Save current movies for next comparison
     start.previous_movies = list(movie_list)
 
@@ -135,7 +155,7 @@ def tamilmv():
             logger.warning("Not enough movies found on the page")
             return [], {}
         for i in range(15):
-            title = temps[i].findAll('a')[0].text.strip()
+            title = temps[i].find_all('a')[0].text.strip()
             link = temps[i].find('a')['href']
             movie_list.append(title)
             movie_details = get_movie_details(link)
@@ -177,32 +197,44 @@ def get_movie_details(url):
         logger.error(f"Error in get_movie_details: {e}")
         return []
 
-# --- Background auto-updater ---
+# --- Background auto-updater with rate limit handling ---
 def auto_update():
     global posted_movies
     while True:
         try:
             # Fetch latest movies
             movie_list, real_dict = tamilmv()
-            # Find new movies not yet posted
             new_movies = [m for m in movie_list if m not in posted_movies]
-            # Post magnet links for new movies
             for new_movie in new_movies:
                 details_list = real_dict.get(new_movie, [])
                 for detail in details_list:
                     magnet_link = extract_magnet_link(detail)
                     if magnet_link:
-                        bot.send_message(
-                            CHANNEL_ID,
-                            f"🎬 <b>New Movie Added:</b> {new_movie}\n\n🧲 <b>Magnet Link:</b>\n<pre>{magnet_link}</pre>",
-                            parse_mode='HTML',
-                            disable_web_page_preview=True
-                        )
-            # Update posted movies set
+                        success = False
+                        while not success:
+                            try:
+                                bot.send_message(
+                                    CHANNEL_ID,
+                                    f"🎬 <b>New Movie Added:</b> {new_movie}\n\n🧲 <b>Magnet Link:</b> <pre>{magnet_link}</pre>",
+                                    parse_mode='HTML',
+                                    disable_web_page_preview=True
+                                )
+                                success = True
+                                time.sleep(0.5)
+                            except telebot.apihelper.ApiException as e:
+                                if '429' in str(e):
+                                    retry_after = int(str(e).split('retry after')[1].split()[0])
+                                    print(f"Rate limited. Retry after {retry_after} seconds.")
+                                    time.sleep(retry_after + 1)
+                                else:
+                                    print(f"Error in auto_update message send: {e}")
+                                    success = True
+            # Record posted movies to avoid reposting
             posted_movies.update(new_movies)
+            save_posted_movies()
         except Exception as e:
             logger.error(f"Error in auto_update: {e}")
-        time.sleep(300)  # check every 5 minutes
+        time.sleep(300)  # check every 5 mins
 
 @app.route('/')
 def health_check():
@@ -219,10 +251,13 @@ def webhook():
         return 'Invalid content type', 403
 
 if __name__ == "__main__":
-    # Start the auto-updater thread
+    # Save current posted movies on startup
+    save_posted_movies()
+
+    # Start auto updater thread
     threading.Thread(target=auto_update, daemon=True).start()
 
-    # Remove webhook and set new one
+    # Webhook setup
     bot.remove_webhook()
     time.sleep(1)
     bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
