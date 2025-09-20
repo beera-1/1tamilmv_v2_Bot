@@ -32,8 +32,6 @@ movie_list = []
 real_dict = {}
 
 # /start command
-
-
 @bot.message_handler(commands=['start'])
 def random_answer(message):
     text_message = """<b>Hello 👋</b>
@@ -63,8 +61,6 @@ def random_answer(message):
     )
 
 # /view command
-
-
 @bot.message_handler(commands=['view'])
 def start(message):
     bot.send_message(message.chat.id, "<b>🧲 Please wait for 10 ⏰ seconds</b>")
@@ -81,7 +77,6 @@ def start(message):
         reply_markup=keyboard
     )
 
-
 @bot.callback_query_handler(func=lambda call: True)
 def callback_query(call):
     global real_dict
@@ -91,7 +86,6 @@ def callback_query(call):
                 for i in real_dict[value]:
                     bot.send_message(call.message.chat.id, text=i)
 
-
 def makeKeyboard(movie_list):
     markup = types.InlineKeyboardMarkup()
     for key, value in enumerate(movie_list):
@@ -100,7 +94,6 @@ def makeKeyboard(movie_list):
                 text=value,
                 callback_data=f"{key}"))
     return markup
-
 
 def tamilmv():
     mainUrl = TAMILMV_URL
@@ -135,7 +128,6 @@ def tamilmv():
         logger.error(f"Error in tamilmv function: {e}")
         return [], {}
 
-
 def get_movie_details(url):
     try:
         html = requests.get(url, timeout=15)
@@ -156,12 +148,15 @@ def get_movie_details(url):
             if torrent_link and not torrent_link.startswith('http'):
                 torrent_link = f'{TAMILMV_URL}{torrent_link}'
 
+            # Extract only the magnet link for notification
+            magnet_link = mag[p]
+
             message = f"""
 <b>📂 Movie Title:</b>
 <blockquote>{movie_title}</blockquote>
 
 🧲 <b>Magnet Link:</b>
-<pre>{mag[p]}</pre>
+<pre>{magnet_link}</pre>
 """
             if torrent_link:
                 message += f"""
@@ -180,11 +175,9 @@ def get_movie_details(url):
         logger.error(f"Error retrieving movie details: {e}")
         return []
 
-
 @app.route('/')
 def health_check():
     return "Angel Bot Healthy", 200
-
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -195,7 +188,6 @@ def webhook():
         return ''
     else:
         return 'Invalid content type', 403
-
 
 if __name__ == "__main__":
     # Remove any previous webhook
