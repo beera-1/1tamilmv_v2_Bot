@@ -21,6 +21,9 @@ TOKEN = os.getenv('TOKEN')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 TAMILMV_URL = os.getenv('TAMILMV_URL', 'https://www.1tamilmv.com')
 PORT = int(os.getenv('PORT', 8080))
+# Your channel username or ID (replace with your actual channel)
+CHANNEL_ID = '-1002585409711'  # e.g., '@mychannel' or chat_id like -100xxxxxxxxx
+
 # ========================================
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 
@@ -31,7 +34,7 @@ app = Flask(__name__)
 movie_list = []
 real_dict = {}
 
-# /start command
+# --- START command ---
 @bot.message_handler(commands=['start'])
 def random_answer(message):
     text_message = """<b>Hello 👋</b>
@@ -60,12 +63,35 @@ def random_answer(message):
         reply_markup=keyboard
     )
 
-# /view command
+# --- /view command ---
 @bot.message_handler(commands=['view'])
 def start(message):
     bot.send_message(message.chat.id, "<b>🧲 Please wait for 10 ⏰ seconds</b>")
     global movie_list, real_dict
     movie_list, real_dict = tamilmv()
+
+    # Load previous movies for comparison
+    previous_movies = getattr(start, 'previous_movies', [])
+
+    # Detect new movies
+    new_movies = [m for m in movie_list if m not in previous_movies]
+
+    # Send only magnet links for new movies to the channel
+    if new_movies:
+        for new_movie in new_movies:
+            details_list = real_dict.get(new_movie, [])
+            for detail in details_list:
+                magnet_link = extract_magnet_link(detail)
+                if magnet_link:
+                    bot.send_message(
+                        CHANNEL_ID,
+                        f"🎬 <b>New Movie Added:</b> {new_movie}\n\n🧲 <b>Magnet Link:</b>\n<pre>{magnet_link}</pre>",
+                        parse_mode='HTML',
+                        disable_web_page_preview=True
+                    )
+
+    # Save current movies for next comparison
+    start.previous_movies = list(movie_list)
 
     combined_caption = """<b><blockquote>🔗 Select a Movie from the list 🎬</blockquote></b>\n\n🔘 Please select a movie:"""
     keyboard = makeKeyboard(movie_list)
@@ -77,14 +103,12 @@ def start(message):
         reply_markup=keyboard
     )
 
-@bot.callback_query_handler(func=lambda call: True)
-def callback_query(call):
-    global real_dict
-    for key, value in enumerate(movie_list):
-        if call.data == f"{key}":
-            if value in real_dict.keys():
-                for i in real_dict[value]:
-                    bot.send_message(call.message.chat.id, text=i)
+def extract_magnet_link(detail_text):
+    # Parse the magnet link from the detail message
+    for line in detail_text.splitlines():
+        if 'magnet:' in line:
+            return line.strip()
+    return None
 
 def makeKeyboard(movie_list):
     markup = types.InlineKeyboardMarkup()
@@ -108,7 +132,6 @@ def tamilmv():
         web = requests.get(mainUrl, headers=headers)
         web.raise_for_status()
         soup = BeautifulSoup(web.text, 'lxml')
-
         temps = soup.find_all('div', {'class': 'ipsType_break ipsContained'})
 
         if len(temps) < 15:
@@ -119,13 +142,12 @@ def tamilmv():
             title = temps[i].findAll('a')[0].text.strip()
             link = temps[i].find('a')['href']
             movie_list.append(title)
-
             movie_details = get_movie_details(link)
             real_dict[title] = movie_details
 
         return movie_list, real_dict
     except Exception as e:
-        logger.error(f"Error in tamilmv function: {e}")
+        logger.error(f"Error in tamilmv: {e}")
         return [], {}
 
 def get_movie_details(url):
@@ -134,23 +156,18 @@ def get_movie_details(url):
         html.raise_for_status()
         soup = BeautifulSoup(html.text, 'lxml')
 
-        mag = [a['href'] for a in soup.find_all(
-            'a', href=True) if 'magnet:' in a['href']]
-        filelink = [a['href'] for a in soup.find_all(
-            'a', {"data-fileext": "torrent", 'href': True})]
+        mag = [a['href'] for a in soup.find_all('a', href=True) if 'magnet:' in a['href']]
+        filelink = [a['href'] for a in soup.find_all('a', {"data-fileext": "torrent", 'href': True})]
 
         movie_details = []
-        movie_title = soup.find('h1').text.strip(
-        ) if soup.find('h1') else "Unknown Title"
+        movie_title = soup.find('h1').text.strip() if soup.find('h1') else "Unknown Title"
 
         for p in range(len(mag)):
             torrent_link = filelink[p] if p < len(filelink) else None
             if torrent_link and not torrent_link.startswith('http'):
                 torrent_link = f'{TAMILMV_URL}{torrent_link}'
 
-            # Extract only the magnet link for notification
             magnet_link = mag[p]
-
             message = f"""
 <b>📂 Movie Title:</b>
 <blockquote>{movie_title}</blockquote>
@@ -172,7 +189,7 @@ def get_movie_details(url):
 
         return movie_details
     except Exception as e:
-        logger.error(f"Error retrieving movie details: {e}")
+        logger.error(f"Error in get_movie_details: {e}")
         return []
 
 @app.route('/')
@@ -193,9 +210,7 @@ if __name__ == "__main__":
     # Remove any previous webhook
     bot.remove_webhook()
     time.sleep(1)
-
     # Set webhook
     bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-
-    # Start Flask app
+    # Run flask app
     app.run(host='0.0.0.0', port=PORT)
