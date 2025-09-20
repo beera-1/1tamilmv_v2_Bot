@@ -18,12 +18,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-# ============ WOODctaft =================
+
+# ================== CONFIG ==================
 TOKEN = os.getenv('TOKEN')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 TAMILMV_URL = os.getenv('TAMILMV_URL', 'https://www.1tamilmv.com')
 PORT = int(os.getenv('PORT', 8080))
-CHANNEL_ID = '-1002585409711'  # replace with your channel id or username
+CHANNEL_ID = '-1002585409711'  # replace with your channel ID or username
 
 # Initialize bot
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
@@ -31,9 +32,11 @@ bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 # Flask app
 app = Flask(__name__)
 
+# --- In-memory variable to track last fetched movies in this session ---
+last_movie_list = []
+
 # --- Load posted movies from file (for persistence) ---
 POSTED_FILE = 'posted_movies.json'
-
 try:
     with open(POSTED_FILE, 'r') as f:
         posted_movies = set(json.load(f))
@@ -45,7 +48,7 @@ def save_posted_movies():
     with open(POSTED_FILE, 'w') as f:
         json.dump(list(posted_movies), f)
 
-# --- START command ---
+# ------------------ /start command ------------------
 @bot.message_handler(commands=['start'])
 def random_answer(message):
     text_message = """<b>Hello 👋</b>
@@ -62,10 +65,13 @@ def random_answer(message):
     keyboard.add(
         types.InlineKeyboardButton(
             '🔗 GitHub 🔗',
-            url='https://github.com/SudoR2spr'),
+            url='https://github.com/SudoR2spr'
+        ),
         types.InlineKeyboardButton(
             text="⚡ Powered By",
-            url='https://t.me/Opleech_WD'))
+            url='https://t.me/Opleech_WD'
+        )
+    )
 
     bot.send_photo(
         chat_id=message.chat.id,
@@ -74,29 +80,29 @@ def random_answer(message):
         reply_markup=keyboard
     )
 
-# --- /view command ---
+# ------------------ /view command ------------------
 @bot.message_handler(commands=['view'])
 def start(message):
     bot.send_message(message.chat.id, "<b>🧲 Please wait for 10 ⏰ seconds</b>")
-    global movie_list, real_dict
+    global last_movie_list
+    # fetch movies
     movie_list, real_dict = tamilmv()
 
-    previous_movies = getattr(start, 'previous_movies', [])
-    new_movies = [m for m in movie_list if m not in previous_movies]
+    # filter out already posted movies (since no persistence, this is just last session)
+    new_movies = [m for m in movie_list if m not in posted_movies]
 
-    # Send magnet links of new movies with rate limit handling
+    # send magnet links of new movies
     for new_movie in new_movies:
         details_list = real_dict.get(new_movie, [])
         for detail in details_list:
             magnet_link = extract_magnet_link(detail)
             if magnet_link:
-                # Handle rate limit
                 success = False
                 while not success:
                     try:
                         bot.send_message(
                             CHANNEL_ID,
-                            f"🎬 <b>New Movie Added:</b> {new_movie}\n\n🧲 <b>Magnet Link:</b>\n<pre>{magnet_link}</pre>",
+                            f"🎬 <b>New Movie Added:</b> {new_movie}\n\n🧲 <b>Magnet Link:</b> <pre>{magnet_link}</pre>",
                             parse_mode='HTML',
                             disable_web_page_preview=True
                         )
@@ -109,10 +115,16 @@ def start(message):
                             time.sleep(retry_after + 1)
                         else:
                             print(f"Error sending message: {e}")
-                            success = True
-    # Save current movies for next comparison
-    start.previous_movies = list(movie_list)
 
+    # update posted movies set
+    for m in new_movies:
+        posted_movies.add(m)
+    save_posted_movies()
+
+    # update last_movie_list for in-memory tracking
+    last_movie_list = list(movie_list)
+
+    # Send a callback message (optional UI)
     combined_caption = """<b><blockquote>🔗 Select a Movie from the list 🎬</blockquote></b>\n\n🔘 Please select a movie:"""
     keyboard = makeKeyboard(movie_list)
 
@@ -135,7 +147,8 @@ def makeKeyboard(movie_list):
         markup.add(
             types.InlineKeyboardButton(
                 text=value,
-                callback_data=f"{key}")
+                callback_data=f"{key}"
+            )
         )
     return markup
 
@@ -144,6 +157,7 @@ def tamilmv():
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
+
     movie_list = []
     real_dict = {}
     try:
@@ -197,14 +211,18 @@ def get_movie_details(url):
         logger.error(f"Error in get_movie_details: {e}")
         return []
 
-# --- Background auto-updater with rate limit handling ---
+# -------- Background auto-updater with in-memory check --------
 def auto_update():
-    global posted_movies
+    global last_movie_list
     while True:
         try:
             # Fetch latest movies
-            movie_list, real_dict = tamilmv()
-            new_movies = [m for m in movie_list if m not in posted_movies]
+            current_movie_list, real_dict = tamilmv()
+
+            # Determine new movies not posted in this session
+            new_movies = [m for m in current_movie_list if m not in posted_movies]
+
+            # Post new movies
             for new_movie in new_movies:
                 details_list = real_dict.get(new_movie, [])
                 for detail in details_list:
@@ -228,14 +246,21 @@ def auto_update():
                                     time.sleep(retry_after + 1)
                                 else:
                                     print(f"Error in auto_update message send: {e}")
-                                    success = True
-            # Record posted movies to avoid reposting
-            posted_movies.update(new_movies)
+
+            # Mark newly posted movies as posted
+            for m in new_movies:
+                posted_movies.add(m)
             save_posted_movies()
+
+            # Update last_movie_list for in-memory comparison
+            last_movie_list = list(current_movie_list)
+
         except Exception as e:
             logger.error(f"Error in auto_update: {e}")
-        time.sleep(300)  # check every 5 mins
 
+        time.sleep(300)  # Check every 5 mins
+
+# ----------------- Webhook routes -----------------
 @app.route('/')
 def health_check():
     return "Angel Bot Healthy", 200
@@ -250,16 +275,15 @@ def webhook():
     else:
         return 'Invalid content type', 403
 
+# ----------------- Main execution -----------------
 if __name__ == "__main__":
-    # Save current posted movies on startup
-    save_posted_movies()
-
-    # Start auto updater thread
+    save_posted_movies()  # save initial state if any
     threading.Thread(target=auto_update, daemon=True).start()
 
     # Webhook setup
     bot.remove_webhook()
     time.sleep(1)
     bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-    # Run Flask server
+
+    # Run Flask app
     app.run(host='0.0.0.0', port=PORT)
