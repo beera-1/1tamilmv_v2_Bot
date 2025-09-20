@@ -1,5 +1,6 @@
 import os
 import time
+import threading  # for background auto-update thread
 from dotenv import load_dotenv
 import telebot
 from telebot import types
@@ -21,10 +22,9 @@ TOKEN = os.getenv('TOKEN')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 TAMILMV_URL = os.getenv('TAMILMV_URL', 'https://www.1tamilmv.com')
 PORT = int(os.getenv('PORT', 8080))
-# Your channel username or ID (replace with your actual channel)
-CHANNEL_ID = '-1002585409711'  # e.g., '@mychannel' or chat_id like -100xxxxxxxxx
+CHANNEL_ID = '-1002585409711'  # your Telegram channel ID or username
 
-# ========================================
+# Initialize bot
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 
 # Flask app
@@ -33,6 +33,7 @@ app = Flask(__name__)
 # Global variables
 movie_list = []
 real_dict = {}
+posted_movies = set()  # to keep track of already posted movies
 
 # --- START command ---
 @bot.message_handler(commands=['start'])
@@ -70,13 +71,13 @@ def start(message):
     global movie_list, real_dict
     movie_list, real_dict = tamilmv()
 
-    # Load previous movies for comparison
+    # Load previous movies
     previous_movies = getattr(start, 'previous_movies', [])
 
     # Detect new movies
     new_movies = [m for m in movie_list if m not in previous_movies]
 
-    # Send only magnet links for new movies to the channel
+    # Send magnet links of new movies
     if new_movies:
         for new_movie in new_movies:
             details_list = real_dict.get(new_movie, [])
@@ -89,7 +90,6 @@ def start(message):
                         parse_mode='HTML',
                         disable_web_page_preview=True
                     )
-
     # Save current movies for next comparison
     start.previous_movies = list(movie_list)
 
@@ -104,7 +104,6 @@ def start(message):
     )
 
 def extract_magnet_link(detail_text):
-    # Parse the magnet link from the detail message
     for line in detail_text.splitlines():
         if 'magnet:' in line:
             return line.strip()
@@ -116,7 +115,8 @@ def makeKeyboard(movie_list):
         markup.add(
             types.InlineKeyboardButton(
                 text=value,
-                callback_data=f"{key}"))
+                callback_data=f"{key}")
+        )
     return markup
 
 def tamilmv():
@@ -124,27 +124,22 @@ def tamilmv():
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
-
     movie_list = []
     real_dict = {}
-
     try:
         web = requests.get(mainUrl, headers=headers)
         web.raise_for_status()
         soup = BeautifulSoup(web.text, 'lxml')
         temps = soup.find_all('div', {'class': 'ipsType_break ipsContained'})
-
         if len(temps) < 15:
             logger.warning("Not enough movies found on the page")
             return [], {}
-
         for i in range(15):
             title = temps[i].findAll('a')[0].text.strip()
             link = temps[i].find('a')['href']
             movie_list.append(title)
             movie_details = get_movie_details(link)
             real_dict[title] = movie_details
-
         return movie_list, real_dict
     except Exception as e:
         logger.error(f"Error in tamilmv: {e}")
@@ -155,42 +150,59 @@ def get_movie_details(url):
         html = requests.get(url, timeout=15)
         html.raise_for_status()
         soup = BeautifulSoup(html.text, 'lxml')
-
         mag = [a['href'] for a in soup.find_all('a', href=True) if 'magnet:' in a['href']]
         filelink = [a['href'] for a in soup.find_all('a', {"data-fileext": "torrent", 'href': True})]
-
         movie_details = []
         movie_title = soup.find('h1').text.strip() if soup.find('h1') else "Unknown Title"
-
         for p in range(len(mag)):
             torrent_link = filelink[p] if p < len(filelink) else None
             if torrent_link and not torrent_link.startswith('http'):
                 torrent_link = f'{TAMILMV_URL}{torrent_link}'
-
             magnet_link = mag[p]
             message = f"""
 <b>📂 Movie Title:</b>
 <blockquote>{movie_title}</blockquote>
-
 🧲 <b>Magnet Link:</b>
-<pre>{magnet_link}</pre>
-"""
+<pre>{magnet_link}</pre>"""
             if torrent_link:
                 message += f"""
 📥 <b>Download Torrent:</b>
-<a href="{torrent_link}">🔗 Click Here</a>
-"""
+<a href="{torrent_link}">🔗 Click Here</a>"""
             else:
                 message += """
-📥 <b>Torrent File:</b> Not Available
-"""
-
+📥 <b>Torrent File:</b> Not Available"""
             movie_details.append(message)
-
         return movie_details
     except Exception as e:
         logger.error(f"Error in get_movie_details: {e}")
         return []
+
+# --- Background auto-updater ---
+def auto_update():
+    global posted_movies
+    while True:
+        try:
+            # Fetch latest movies
+            movie_list, real_dict = tamilmv()
+            # Find new movies not yet posted
+            new_movies = [m for m in movie_list if m not in posted_movies]
+            # Post magnet links for new movies
+            for new_movie in new_movies:
+                details_list = real_dict.get(new_movie, [])
+                for detail in details_list:
+                    magnet_link = extract_magnet_link(detail)
+                    if magnet_link:
+                        bot.send_message(
+                            CHANNEL_ID,
+                            f"🎬 <b>New Movie Added:</b> {new_movie}\n\n🧲 <b>Magnet Link:</b>\n<pre>{magnet_link}</pre>",
+                            parse_mode='HTML',
+                            disable_web_page_preview=True
+                        )
+            # Update posted movies set
+            posted_movies.update(new_movies)
+        except Exception as e:
+            logger.error(f"Error in auto_update: {e}")
+        time.sleep(300)  # check every 5 minutes
 
 @app.route('/')
 def health_check():
@@ -207,10 +219,12 @@ def webhook():
         return 'Invalid content type', 403
 
 if __name__ == "__main__":
-    # Remove any previous webhook
+    # Start the auto-updater thread
+    threading.Thread(target=auto_update, daemon=True).start()
+
+    # Remove webhook and set new one
     bot.remove_webhook()
     time.sleep(1)
-    # Set webhook
     bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-    # Run flask app
+    # Run Flask server
     app.run(host='0.0.0.0', port=PORT)
